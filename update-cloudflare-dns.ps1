@@ -1,64 +1,3 @@
-### Get External ip from internet
-function Get-Ip-External {
-  param ([bool] $IPv6)
-  if ($IPv6) {
-      return (Invoke-RestMethod -Uri "http://v6.ident.me" -TimeoutSec 10).Trim()
-  } else {
-      return (Invoke-RestMethod -Uri "https://checkip.amazonaws.com" -TimeoutSec 10).Trim()
-  }
-}
-
-### Get Internal ip from primary interface
-function Get-Ip-Internal {
-  param ([bool] $IPv6)
-
-  if ($IsLinux) {
-      if ($IPv6) {
-          return ip -6 addr | grep inet6 | awk -F '[ \t]+|/' '{print $3}' | grep -v ^::1 | grep -v ^f | sort | head -1
-      }
-      else {
-          return ip -4 addr | grep inet | awk -F '[ \t]+|/' '{print $3}' | grep -v ^127 | grep -v ^192 | grep -v ^f | head -1
-      }
-  } elseif ($IsWindows) {
-      $InternalIPTestAddress = switch ($IPv6) {
-          $true { "2606:4700::1111" }
-          $false { "1.1.1.1" }
-      }
-      $addr = $((Find-NetRoute -RemoteIPAddress $InternalIPTestAddress).IPAddress|out-string).Trim()
-      if ($addr -eq "127.0.0.1" -or $addr -eq "::1") {
-          return $null
-      }
-      return $addr
-  } elseif ($IsMacOS) {
-      throw "Get-Internal-IpAddress is not implemented for MacOS."
-  }
-}
-
-### Get IP address of DNS record from 1.1.1.1 DNS server when proxied is "false"
-function Resolve-DnsName-From-Cloudflare {
-  param ([bool] $DoH, [string] $domain, [bool] $IPv6)
-  $type = switch ($IPv6) {
-      $true { "AAAA" }
-      $false { "A" }
-  }
-  if ($DoH) {
-      $response = Invoke-RestMethod -Proxy $http_proxy -ProxyCredential $proxy_credential -Uri https://cloudflare-dns.com/dns-query -Body @{
-          name = $domain
-          type = $type
-      } -Headers @{ 'Accept' = 'application/dns-json' }
-      if ($response) {
-          return $response.Answer[0].data
-      }
-      return $null
-  } else {
-      $ip = (Resolve-DnsName -Name $domain -Server 1.1.1.1 -Type $type | Select-Object -First 1)
-      if ($ip) {
-        return $ip.IPAddress.Trim()
-      }
-      return $null
-  }
-}
-
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
 ### updateDNS.log file of the last run for debug
@@ -124,9 +63,10 @@ foreach($current_key in $dns_records.Keys){
   $ip = $null
   $dns_record_ip = $null
   $is_proxied = $null
-
+  
+  ### Get External ip from https://checkip.amazonaws.com
   if ($what_ip -eq 'external') {
-    $ip = Get-Ip-External -IPv6 $IPv6
+    $ip = (Invoke-RestMethod -Uri "https://checkip.amazonaws.com" -TimeoutSec 10).Trim()
     if (!([bool]$ip)) {
       Write-Output "Error! Can't get external ip from https://checkip.amazonaws.com" | Tee-Object $File_LOG -Append
       Exit
@@ -134,8 +74,8 @@ foreach($current_key in $dns_records.Keys){
     Write-Output "==> External IP is: $ip" | Tee-Object $File_LOG -Append
   }
   elseif ($what_ip -eq 'internal') {
-    $ip = Get-Ip-Internal -IPv6 $IPv6
-    if (![bool]$ip) {
+    $ip = $((Find-NetRoute -RemoteIPAddress 1.1.1.1).IPAddress|out-string).Trim()
+    if (!([bool]$ip) -or ($ip -eq "127.0.0.1")) {
       Write-Output "==>Error! Can't get internal ip address" | Tee-Object $File_LOG -Append
       Exit
     }
@@ -146,10 +86,13 @@ foreach($current_key in $dns_records.Keys){
   if ($proxied -eq $true) {
     $dns_record_info = @{
       Uri     = "https://api.cloudflare.com/client/v4/zones/$zoneid/dns_records?name=$dns_record"
-      Headers = @{"Authorization" = "Bearer $cloudflare_zone_api_token"; "Content-Type" = "application/json" }
+      Headers = @{
+        "Authorization" = "Bearer $cloudflare_zone_api_token";
+        "Content-Type" = "application/json" 
+      }
     }
 
-    $response = Invoke-RestMethod -Proxy $http_proxy -ProxyCredential $proxy_credential @dns_record_info
+    $response = Invoke-RestMethod @dns_record_info
     if ($response.success -ne "True") {
       Write-Output "Error! Can't get dns record info from cloudflare's api" | Tee-Object $File_LOG -Append
     }
@@ -157,7 +100,7 @@ foreach($current_key in $dns_records.Keys){
     $dns_record_ip = $response.result.content.Trim()
   }
   elseif ($proxied -eq $false) {
-    $dns_record_ip = Resolve-DnsName-From-Cloudflare -DoH $DNS_over_HTTPS -domain $dns_record -IPv6 $IPv6
+      $dns_record_ip = (Resolve-DnsName -Name $dns_record -Server 1.1.1.1 -Type A | Select-Object -First 1).IPAddress.Trim()
     if (![bool]$dns_record_ip) {
       Write-Output "Error! Can't resolve the ${dns_record} via 1.1.1.1 DNS server" | Tee-Object $File_LOG -Append
       Exit
@@ -179,7 +122,7 @@ foreach($current_key in $dns_records.Keys){
     Headers = @{"Authorization" = "Bearer $cloudflare_zone_api_token"; "Content-Type" = "application/json" }
   }
 
-  $cloudflare_record_info_resposne = Invoke-RestMethod -Proxy $http_proxy -ProxyCredential $proxy_credential @cloudflare_record_info
+  $cloudflare_record_info_resposne = Invoke-RestMethod @cloudflare_record_info
   if ($cloudflare_record_info_resposne.success -ne "True") {
     Write-Output "Error! Can't get $dns_record record inforamiton from cloudflare API" | Tee-Object $File_LOG -Append
     Continue
@@ -194,10 +137,7 @@ foreach($current_key in $dns_records.Keys){
     Method  = 'PUT'
     Headers = @{"Authorization" = "Bearer $cloudflare_zone_api_token"; "Content-Type" = "application/json" }
     Body    = @{
-      "type"    = switch ($IPv6) {
-          $true { "AAAA" }
-          $false { "A" }
-      }
+      "type"    = "A"
       "name"    = $dns_record
       "content" = $ip
       "ttl"     = $ttl
@@ -205,7 +145,7 @@ foreach($current_key in $dns_records.Keys){
     } | ConvertTo-Json
   }
 
-  $update_dns_record_response = Invoke-RestMethod -Proxy $http_proxy -ProxyCredential $proxy_credential @update_dns_record
+  $update_dns_record_response = Invoke-RestMethod @update_dns_record
   if ($update_dns_record_response.success -ne "True") {
     Write-Output "Error! Update Failed" | Tee-Object $File_LOG -Append
     Continue
@@ -224,7 +164,7 @@ foreach($current_key in $dns_records.Keys){
       Uri    = "https://api.telegram.org/bot$telegram_bot_API_Token/sendMessage?chat_id=$telegram_chat_id&text=$dns_record DNS Record Updated To: $ip"
       Method = 'GET'
     }
-    $telegram_notification_response = Invoke-RestMethod -Proxy $http_proxy -ProxyCredential $proxy_credential @telegram_notification
+    $telegram_notification_response = Invoke-RestMethod @telegram_notification
     if ($telegram_notification_response.ok -ne "True") {
       Write-Output "Error! Telegram notification failed" | Tee-Object $File_LOG -Append
       Continue
@@ -241,7 +181,7 @@ foreach($current_key in $dns_records.Keys){
       Headers = @{ "Content-Type" = "application/json" }
     }
     try {
-      Invoke-RestMethod -Proxy $http_proxy -ProxyCredential $proxy_credential @discord_notification
+      Invoke-RestMethod @discord_notification
     } catch {
       Write-Host "==> Discord notification request failed. Here are the details for the exception:" | Tee-Object $File_LOG -Append
       Write-Host "==> Request StatusCode:" $_.Exception.Response.StatusCode.value__  | Tee-Object $File_LOG -Append

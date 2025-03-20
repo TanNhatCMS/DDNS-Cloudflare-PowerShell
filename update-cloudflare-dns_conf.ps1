@@ -21,11 +21,6 @@ $dns_records = [ordered]@{
 		ttl = 1;
 	} #record 2
 }
-## Use IPv6
-$IPv6 = $false
-## if use DoH to query the current IP address
-$DNS_over_HTTPS = $false
-
 ## Cloudflare's Zone ID - Cloudflare Dashboard -> Websites -> example.com -> Overview -> API Zone ID on right-hand sidebar
 $zoneid = "ChangeMe"
 ## Cloudflare Zone API Token - Instructions: https://github.com/fire1ce/DDNS-Cloudflare-PowerShell/blob/main/README.md#creating-cloudflare-api-token
